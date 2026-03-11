@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Python
+backend/venv/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Generated audio/video files
+backend/static/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# macOS
+.DS_Store
