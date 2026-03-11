@@ -128,7 +128,7 @@ export default function App() {
     }
   }
 
-  // ── Step 4: Generate video → call /generate-video ─────────────────────────
+  // ── Step 4: Generate video → submit task, then poll ──────────────────────
   const handleGenerateVideo = async (essayText) => {
     setLoadingMsg('🎬 正在制作故事视频...')
 
@@ -137,14 +137,29 @@ export default function App() {
       formData.append('image', imageFile)
       formData.append('essay_text', essayText)
 
+      // Submit job, get task_id immediately
       const res = await fetch('/generate-video', { method: 'POST', body: formData })
       if (!res.ok) {
         const err = await res.json()
         throw new Error(err.detail || '视频生成失败')
       }
-      const data = await res.json()
-      setVideoUrl(data.video_url)
-      setStage('result')
+      const { task_id } = await res.json()
+
+      // Poll every 3 seconds until done or error
+      while (true) {
+        await new Promise(r => setTimeout(r, 3000))
+        const pollRes = await fetch(`/task/${task_id}`)
+        if (!pollRes.ok) throw new Error('视频任务查询失败')
+        const task = await pollRes.json()
+        if (task.status === 'done') {
+          setVideoUrl(task.video_url)
+          setStage('result')
+          return
+        } else if (task.status === 'error') {
+          throw new Error(task.detail || '视频生成失败')
+        }
+        // status === 'pending', keep waiting
+      }
     } catch (e) {
       setError(e.message)
       // Still show essay even if video fails

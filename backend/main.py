@@ -1,10 +1,11 @@
 import os
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -109,14 +110,37 @@ async def essay(
     return {"essay": essay_text}
 
 
+# In-memory task store: task_id → {"status": "pending"|"done"|"error", ...}
+_tasks: dict = {}
+
+
+async def _run_video(task_id: str, image_bytes: bytes, content_type: str, essay_text: str):
+    """Background task: generate TTS + video, update _tasks when done."""
+    try:
+        audio_filename = await generate_audio(essay_text)
+        try:
+            video_filename = await create_wan_video(image_bytes, audio_filename, essay_text, content_type)
+        except Exception as wan_err:
+            print(f"[DOUBAO VIDEO FAILED] {wan_err}", flush=True)
+            video_filename = await create_video(image_bytes, audio_filename)
+        _tasks[task_id] = {
+            "status": "done",
+            "video_url": f"/static/{video_filename}",
+            "audio_url": f"/static/{audio_filename}",
+        }
+    except Exception as e:
+        _tasks[task_id] = {"status": "error", "detail": str(e)}
+
+
 @app.post("/generate-video")
 async def video(
+    background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
     essay_text: str = Form(...)
 ):
     """
-    Upload image + essay text, generate TTS audio, combine into MP4 video.
-    Returns URL to the generated video.
+    Submit video generation job. Returns task_id immediately.
+    Poll GET /task/{task_id} for status.
     """
     if image.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=400, detail="Unsupported image type.")
@@ -125,24 +149,16 @@ async def video(
         raise HTTPException(status_code=400, detail="Essay text cannot be empty.")
 
     image_bytes = await image.read()
+    task_id = uuid.uuid4().hex
+    _tasks[task_id] = {"status": "pending"}
+    background_tasks.add_task(_run_video, task_id, image_bytes, image.content_type, essay_text)
+    return {"task_id": task_id}
 
-    # Step 1: Generate TTS audio
-    try:
-        audio_filename = await generate_audio(essay_text)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
 
-    # Step 2: Generate AI animated video; fall back to Ken Burns on failure
-    try:
-        video_filename = await create_wan_video(image_bytes, audio_filename, essay_text, image.content_type)
-    except Exception as wan_err:
-        print(f"[DOUBAO VIDEO FAILED] {wan_err}", flush=True)
-        try:
-            video_filename = await create_video(image_bytes, audio_filename)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Video creation failed: {str(e)}")
-
-    return {
-        "video_url": f"/static/{video_filename}",
-        "audio_url": f"/static/{audio_filename}"
-    }
+@app.get("/task/{task_id}")
+async def get_task(task_id: str):
+    """Poll video generation task status."""
+    task = _tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
